@@ -1,1 +1,212 @@
+---
+- name: Configure servers
+  hosts: hng
+  become: true
+  become_method: sudo
+  become_user: root
+  tasks:
+    # Common tasks
+    - name: Create user hng with sudo privileges
+      ansible.builtin.user:
+        name: hng
+        groups: sudo
+        state: present
+        createhome: yes
+        shell: /bin/bash
 
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - acl
+        - git
+        - python3-pip
+        - python3-venv
+
+    - name: Ensure /opt/stage_5b directory exists
+      ansible.builtin.file:
+        path: /opt/stage_5b
+        state: directory
+        owner: hng
+        group: hng
+        mode: '0755'
+
+    - name: Ensure /var/secrets directory exists
+      ansible.builtin.file:
+        path: /var/secrets
+        state: directory
+        owner: hng
+        group: hng
+        mode: '0700'
+
+    - name: Clone the DevOps branch of the repo into /opt/stage_5b
+      ansible.builtin.git:
+        repo: 'https://github.com/hngprojects/hng_boilerplate_expressjs.git'
+        version: devops
+        dest: /opt/stage_5b
+        force: yes
+        accept_hostkey: yes
+        key_file: /home/hng/.ssh/id_ed25519
+      become_user: hng
+
+    # PostgreSQL tasks
+    - name: Install PostgreSQL
+      ansible.builtin.apt:
+        name: postgresql
+        state: present
+
+    - name: Install PostgreSQL contrib package
+      ansible.builtin.apt:
+        name: postgresql-contrib
+        state: present
+
+    - name: Install Python dependencies for PostgreSQL
+      ansible.builtin.apt:
+        name: python3-psycopg2
+        state: present
+
+    - name: Start and enable PostgreSQL service
+      ansible.builtin.service:
+        name: postgresql
+        state: started
+        enabled: true
+
+    - name: Save PostgreSQL admin credentials
+      ansible.builtin.copy:
+        content: |
+          POSTGRES_USER=admin
+          POSTGRES_PASSWORD=secure_password
+        dest: /var/secrets/pg_pw.txt
+        owner: hng
+        group: hng
+        mode: '0600'
+
+    - name: Create PostgreSQL database and user
+      become_user: postgres
+      ansible.builtin.postgresql_db:
+        name: myappdb
+
+    - name: Create PostgreSQL user
+      become_user: postgres
+      ansible.builtin.postgresql_user:
+        name: admin
+        password: secure_password
+        state: present
+
+    - name: Grant all privileges on database to the user
+      become_user: postgres
+      ansible.builtin.postgresql_privs:
+        db: myappdb
+        role: admin
+        privs: ALL
+        type: database
+
+    # Redis tasks
+    - name: Install Redis
+      ansible.builtin.apt:
+        name: redis-server
+        state: present
+
+    - name: Start and enable Redis service
+      ansible.builtin.service:
+        name: redis-server
+        state: started
+        enabled: true
+
+    # Application tasks
+    - name: Configure Git to trust the repository directory
+      ansible.builtin.command:
+        cmd: git config --global --add safe.directory /opt/stage_5b
+
+    - name: Change ownership of /opt/stage_5b
+      ansible.builtin.file:
+        path: /opt/stage_5b
+        state: directory
+        owner: hng
+        group: hng
+        recurse: yes
+
+    - name: Install Yarn
+      ansible.builtin.apt_key:
+        url: https://dl.yarnpkg.com/debian/pubkey.gpg
+        state: present
+
+    - name: Add Yarn APT repository
+      ansible.builtin.apt_repository:
+        repo: 'deb https://dl.yarnpkg.com/debian/ stable main'
+        state: present
+
+    - name: Install Yarn
+      ansible.builtin.apt:
+        name: yarn
+        state: present
+
+    - name: Install application dependencies
+      ansible.builtin.yarn:
+        path: /opt/stage_5b
+        state: present
+
+    - name: Configure environment variables
+      ansible.builtin.copy:
+        content: |
+          PORT=3000
+          DATABASE_URL=postgresql://admin:secure_password@localhost/myappdb
+          REDIS_URL=redis://localhost:6379
+        dest: /opt/stage_5b/.env
+        owner: hng
+        group: hng
+        mode: '0600'
+
+    - name: Start application
+      ansible.builtin.shell:
+        cmd: "yarn start > /var/log/stage_5b/out.log 2> /var/log/stage_5b/error.log &"
+        chdir: /opt/stage_5b
+      environment:
+        NODE_ENV: production
+
+    # Nginx tasks
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    - name: Start and enable Nginx service
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Configure Nginx to reverse proxy
+      ansible.builtin.copy:
+        content: |
+          server {
+            listen 0.0.0.0:80;
+            server_name localhost;
+
+            location / {
+              proxy_pass http://127.0.0.1:3000;
+              proxy_http_version 1.1;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection 'upgrade';
+              proxy_set_header Host $host;
+              proxy_cache_bypass $http_upgrade;
+            }
+          }
+        dest: /etc/nginx/sites-available/default
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Test Nginx configuration
+      ansible.builtin.command:
+        cmd: nginx -t
+
+    - name: Reload Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
