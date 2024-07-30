@@ -16,7 +16,7 @@ ansible/
 - **ansible.cfg**: Configuration file for Ansible.
 - **inventory.cfg**: Inventory file specifying the hosts.
 - **playbooks/main.yaml**: The main playbook that orchestrates the tasks.
-- #roles/hng/tasks/main.yaml**: Role-specific tasks for the `hng` user.
+- 
 
 ## Prerequisites
 
